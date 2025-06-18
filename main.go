@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -11,23 +13,30 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func readCsv(path string, maxRows int) ([][]string, error) {
+func openCsv(path string) (*csv.Reader, *os.File, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer file.Close()
 
 	reader := csv.NewReader(file)
-	rows, err := reader.ReadAll()
-	if err != nil {
-		return nil, err
-	}
+	return reader, file, nil
+}
 
-	if len(rows)-1 <= maxRows {
-		return rows[1:], nil
+func readCsv(rowCh chan []string, csvReader *csv.Reader) {
+	defer close(rowCh)
+
+	for {
+		row, err := csvReader.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		rowCh <- row
 	}
-	return rows[1 : maxRows+1], nil
 }
 
 func newDbPool(dsn string) (*pgxpool.Pool, error) {
@@ -38,73 +47,57 @@ func newDbPool(dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-func insertChessRow(rowCh chan chessRow, workerNum int) {
-	dbPool, err := newDbPool("postgres://marybeth:marybeth@localhost:5432/marybeth?sslmode=disable")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for c := range rowCh {
-		c.worker_num = workerNum
-		_, err := dbPool.Exec(context.Background(),
-			"insert into chess (id, rated, created_at, last_move_at, turns, worker_num) values ($1, $2, $3, $4, $5, $6)",
-			c.id, c.rated, c.created_at, c.last_move_at, c.turns, c.worker_num)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func distributeWorker(rowCh chan chessRow, maxWorkers int) {
+func distributeWorker(rowCh chan []string, dbPool *pgxpool.Pool, maxWorkerNum int) {
 	var wg sync.WaitGroup
-	for i := range maxWorkers {
+	for i := range maxWorkerNum {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			insertChessRow(rowCh, i)
+			insertRow(rowCh, dbPool, i)
 		}()
 	}
 	wg.Wait()
 }
 
-type chessRow struct {
-	id           string
-	rated        string
-	created_at   string
-	last_move_at string
-	turns        string
-	worker_num   int
+func insertRow(rowCh chan []string, dbPool *pgxpool.Pool, workerNum int) {
+	jobCount := 0
+
+	for c := range rowCh {
+		_, err := dbPool.Exec(context.Background(),
+			"insert into chess (id, rated, created_at, last_move_at, turns, worker_num) values ($1, $2, $3, $4, $5, $6)",
+			c[0], c[1], c[2], c[3], c[4], workerNum)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		jobCount++
+		logWorker(jobCount, workerNum)
+
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
-type chess struct {
-	data []chessRow
+func logWorker(jobCount int, workerNum int) {
+	if jobCount%10 == 0 {
+		fmt.Printf("worker %v has inserted %v rows\n", workerNum, jobCount)
+	}
 }
 
 func main() {
-	chessData := chess{}
-	rows, err := readCsv("games.csv", 9)
+	csvReader, file, err := openCsv("games.csv")
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, row := range rows {
-		chessData.data = append(chessData.data, chessRow{
-			id:           row[0],
-			rated:        row[1],
-			created_at:   row[2],
-			last_move_at: row[3],
-			turns:        row[4],
-		})
+	defer file.Close()
+
+	rowCh := make(chan []string)
+	go readCsv(rowCh, csvReader)
+
+	dbPool, err := newDbPool("postgres://marybeth:marybeth@localhost:5432/marybeth?sslmode=disable")
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	chessRowCh := make(chan chessRow)
-	go func() {
-		defer close(chessRowCh)
-		for _, row := range chessData.data {
-			chessRowCh <- row
-		}
-	}()
-
-	distributeWorker(chessRowCh, 5)
+	distributeWorker(rowCh, dbPool, 50)
 }
