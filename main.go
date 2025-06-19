@@ -26,12 +26,18 @@ func openCsv(path string) (*csv.Reader, *os.File, error) {
 func readCsv(rowCh chan []string, csvReader *csv.Reader) {
 	defer close(rowCh)
 
+	firstIdx := true
 	for {
 		row, err := csvReader.Read()
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
+			continue
+		}
+
+		if firstIdx {
+			firstIdx = false
 			continue
 		}
 
