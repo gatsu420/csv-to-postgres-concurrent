@@ -53,23 +53,23 @@ func newDbPool(dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-func distributeWorker(rowCh chan []string, dbPool *pgxpool.Pool, maxWorkerNum int) {
+func distributeWorker(ctx context.Context, rowCh chan []string, dbPool *pgxpool.Pool, maxWorkerNum int) {
 	var wg sync.WaitGroup
 	for i := range maxWorkerNum {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			insertRow(rowCh, dbPool, i)
+			insertRow(ctx, rowCh, dbPool, i)
 		}()
 	}
 	wg.Wait()
 }
 
-func insertRow(rowCh chan []string, dbPool *pgxpool.Pool, workerNum int) {
+func insertRow(ctx context.Context, rowCh chan []string, dbPool *pgxpool.Pool, workerNum int) {
 	jobCount := 0
 
 	for c := range rowCh {
-		_, err := dbPool.Exec(context.Background(),
+		_, err := dbPool.Exec(ctx,
 			"insert into chess (id, rated, created_at, last_move_at, turns, worker_num) values ($1, $2, $3, $4, $5, $6)",
 			c[0], c[1], c[2], c[3], c[4], workerNum)
 		if err != nil {
@@ -105,5 +105,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	distributeWorker(rowCh, dbPool, 50)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	distributeWorker(ctx, rowCh, dbPool, 50)
 }
